@@ -36,11 +36,20 @@ function calculateInferenceVRAM(config: InferenceConfig): VRAMResults {
   const weights = (parameters * weightBytes) / (1024 ** 3); 
 
   const kvCacheBytes = PRECISION_BYTES[kvCachePrecision];
-  const kvCache = (2 * layers * kvHeads * headDimension * sequenceLength * batchSize * concurrentUsers * kvCacheBytes) / (1024 ** 3);
+  const kvCache = (
+    2 * layers * kvHeads * headDimension * sequenceLength * batchSize * concurrentUsers * kvCacheBytes
+  ) / (1024 ** 3);
 
   const effectiveBatchSize = Math.pow(batchSize, 0.8);
+
+  // Apply fp32 boost to activations only
+  const fp32ActivationMultiplier =
+    weightPrecision === "fp32"
+      ? 1 + 0.27 * Math.log2(batchSize + 1)
+      : 1;
+
   const activations = (
-  layers * effectiveBatchSize * sequenceLength * hiddenSize * weightBytes
+    layers * effectiveBatchSize * sequenceLength * hiddenSize * weightBytes * fp32ActivationMultiplier
   ) / (1024 ** 3 * numGPUs);
 
   const overheadMultiplier = 0.2;
@@ -87,8 +96,6 @@ function calculateInferenceVRAM(config: InferenceConfig): VRAMResults {
     breakdown
   };
 }
-
-
 
 function calculateFineTuningVRAM(config: FineTuningConfig): VRAMResults {
   const {
