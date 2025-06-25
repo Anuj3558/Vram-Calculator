@@ -26,7 +26,7 @@ const Index = () => {
     hiddenSize: 2560,
     kvHeads: 20,
     headDimension: 128,
-    batchSize: 16,
+    batchSize: 1,
     sequenceLength: 2048,
     weightPrecision: "fp16",
     kvCachePrecision: "fp16",

@@ -1,4 +1,3 @@
-
 import { ModelConfig, VRAMResults, InferenceConfig, FineTuningConfig } from "@/types/calculator";
 
 const PRECISION_BYTES = {
@@ -29,43 +28,51 @@ function calculateInferenceVRAM(config: InferenceConfig): VRAMResults {
     kvCachePrecision,
     availableVRAM,
     concurrentUsers,
-    numGPUs
+    numGPUs,
+    hiddenSize
   } = config;
 
-  // Weight memory calculation
   const weightBytes = PRECISION_BYTES[weightPrecision];
-  const weights = (parameters * weightBytes) / (1024 ** 3); // Convert to GB
+  const weights = (parameters * weightBytes) / (1024 ** 3); 
 
-  // KV-cache calculation (multiplied by concurrent users)
   const kvCacheBytes = PRECISION_BYTES[kvCachePrecision];
   const kvCache = (2 * layers * kvHeads * headDimension * sequenceLength * batchSize * concurrentUsers * kvCacheBytes) / (1024 ** 3);
 
-  // Activation memory (scaled by batch size and concurrent users)
-  const activations = (weights * 0.15 * batchSize * concurrentUsers) / numGPUs;
+  const effectiveBatchSize = Math.pow(batchSize, 0.8);
+  const activations = (
+  layers * effectiveBatchSize * sequenceLength * hiddenSize * weightBytes
+  ) / (1024 ** 3 * numGPUs);
 
-  // Overhead (CUDA runtime, PyTorch overhead, etc.)
-  const overhead = (weights + kvCache + activations) * 0.1;
+  const overheadMultiplier = 0.2;
+  const overhead = (weights + kvCache + activations) * overheadMultiplier;
 
-  const total = (weights + kvCache + activations + overhead) / numGPUs;
+  const reservedSystemBuffer = 0.3; 
+  const total = (weights + kvCache + activations + overhead + reservedSystemBuffer) / numGPUs;
+
   const fitsOnGPU = total <= availableVRAM;
   const utilizationPercentage = Math.min((total / availableVRAM) * 100, 100);
+  const totalMemory = total * numGPUs;
 
   const breakdown = {
-    weights: { 
-      value: weights / numGPUs, 
-      percentage: (weights / (total * numGPUs)) * 100 
+    weights: {
+      value: weights / numGPUs,
+      percentage: (weights / totalMemory) * 100,
     },
-    kvCache: { 
-      value: kvCache / numGPUs, 
-      percentage: (kvCache / (total * numGPUs)) * 100 
+    kvCache: {
+      value: kvCache / numGPUs,
+      percentage: (kvCache / totalMemory) * 100,
     },
-    activations: { 
-      value: activations, 
-      percentage: (activations / total) * 100 
+    activations: {
+      value: activations,
+      percentage: (activations / total) * 100,
     },
-    overhead: { 
-      value: overhead / numGPUs, 
-      percentage: (overhead / (total * numGPUs)) * 100 
+    overhead: {
+      value: overhead / numGPUs,
+      percentage: (overhead / totalMemory) * 100,
+    },
+    reserved: {
+      value: reservedSystemBuffer / numGPUs,
+      percentage: (reservedSystemBuffer / totalMemory) * 100,
     }
   };
 
@@ -81,14 +88,15 @@ function calculateInferenceVRAM(config: InferenceConfig): VRAMResults {
   };
 }
 
+
+
 function calculateFineTuningVRAM(config: FineTuningConfig): VRAMResults {
   const {
     parameters,
     layers,
-    kvHeads,
-    headDimension,
     batchSize,
     sequenceLength,
+    hiddenSize,
     basePrecision,
     availableVRAM,
     gradientAccumulation,
@@ -96,61 +104,73 @@ function calculateFineTuningVRAM(config: FineTuningConfig): VRAMResults {
     fineTuningMethod
   } = config;
 
-  // Weight memory calculation
-  const weightBytes = PRECISION_BYTES[basePrecision];
-  const weights = (parameters * weightBytes) / (1024 ** 3);
+  const precisionBytes = PRECISION_BYTES[basePrecision];
 
-  // Gradient memory (same as weights for full fine-tuning)
-  const gradients = fineTuningMethod === "full" ? weights : weights * 0.1; // LoRA uses much less
+  // More realistic memory usage estimates
+  const weights = (parameters * precisionBytes) / (1024 ** 3); // GB
 
-  // Optimizer states (Adam: 2x parameters for momentum and variance)
-  const optimizer = fineTuningMethod === "full" ? weights * 2 : weights * 0.2;
+  const gradients = fineTuningMethod === "full"
+    ? (parameters * precisionBytes) / (1024 ** 3) // FP16 gradients
+    : (parameters * precisionBytes * 0.1) / (1024 ** 3); // LoRA: 10%
 
-  // KV-cache (minimal during training)
-  const kvCacheBytes = PRECISION_BYTES[basePrecision];
-  const kvCache = (2 * layers * kvHeads * headDimension * sequenceLength * batchSize * kvCacheBytes) / (1024 ** 3);
+  const optimizer = fineTuningMethod === "full"
+    ? (parameters * 2 * precisionBytes) / (1024 ** 3) // 2x FP16 for Adam (realistic)
+    : (parameters * precisionBytes * 0.2) / (1024 ** 3); // LoRA
 
-  // Activation memory (much higher during training)
-  const activations = (weights * 0.5 * batchSize * gradientAccumulation) / numGPUs;
+  // Activation memory (realistic)
+  const activations = (
+    layers *
+    batchSize *
+    sequenceLength *
+    hiddenSize *
+    4 * // MLP intermediate factor
+    2 * // forward + backward
+    precisionBytes *
+    gradientAccumulation
+  ) / (1024 ** 3 * numGPUs);
 
-  // Overhead
-  const overhead = (weights + gradients + optimizer + kvCache + activations) * 0.15;
+  // No KV cache in training
+  const kvCache = 0;
 
-  const total = (weights + gradients + optimizer + kvCache + activations + overhead) / numGPUs;
+  // Lower overhead to 5%
+  const overhead = (weights + gradients + optimizer + activations) * 0.05;
+
+  const total = (weights + gradients + optimizer + activations + overhead) / numGPUs;
   const fitsOnGPU = total <= availableVRAM;
   const utilizationPercentage = Math.min((total / availableVRAM) * 100, 100);
 
   const totalMemory = total * numGPUs;
+
   const breakdown = {
-    weights: { 
-      value: weights / numGPUs, 
-      percentage: (weights / totalMemory) * 100 
+    weights: {
+      value: weights / numGPUs,
+      percentage: (weights / totalMemory) * 100
     },
-    gradients: { 
-      value: gradients / numGPUs, 
-      percentage: (gradients / totalMemory) * 100 
+    gradients: {
+      value: gradients / numGPUs,
+      percentage: (gradients / totalMemory) * 100
     },
-    optimizer: { 
-      value: optimizer / numGPUs, 
-      percentage: (optimizer / totalMemory) * 100 
+    optimizer: {
+      value: optimizer / numGPUs,
+      percentage: (optimizer / totalMemory) * 100
     },
-    kvCache: { 
-      value: kvCache / numGPUs, 
-      percentage: (kvCache / totalMemory) * 100 
+    kvCache: {
+      value: kvCache,
+      percentage: 0
     },
-    activations: { 
-      value: activations, 
-      percentage: (activations / total) * 100 
+    activations: {
+      value: activations,
+      percentage: (activations / total) * 100
     },
-    overhead: { 
-      value: overhead / numGPUs, 
-      percentage: (overhead / totalMemory) * 100 
+    overhead: {
+      value: overhead / numGPUs,
+      percentage: (overhead / totalMemory) * 100
     }
   };
 
   return {
     weights: weights / numGPUs,
-    kvCache: kvCache / numGPUs,
+    kvCache,
     activations,
     gradients: gradients / numGPUs,
     optimizer: optimizer / numGPUs,
